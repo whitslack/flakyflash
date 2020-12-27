@@ -257,12 +257,12 @@ int main(int argc, char *argv[]) {
 			std::clog <<
 					"bs.hidden_sectors = " << +bs->hidden_sectors << "\n"
 					"bs.total_logical_sectors = " << +bs->total_logical_sectors <<
-						" (" << byte_count(bs->total_logical_sectors * bs->bytes_per_logical_sector) << ")\n";
+						" (" << byte_count(uintmax_t { bs->total_logical_sectors } * bs->bytes_per_logical_sector) << ")\n";
 		}
 		if (fat32) {
 			std::clog <<
 					"fat32.logical_sectors_per_fat = " << +fat32->logical_sectors_per_fat <<
-						" (" << byte_count(fat32->logical_sectors_per_fat * bs->bytes_per_logical_sector) << ")\n"
+						" (" << byte_count(uintmax_t { fat32->logical_sectors_per_fat } * bs->bytes_per_logical_sector) << ")\n"
 					"fat32.mirroring_flags = " << std::hex << +fat32->mirroring_flags << std::dec << "\n"
 					"fat32.version = " << (fat32->version >> 8) << '.' << (fat32->version & 0xFF) << "\n"
 					"fat32.root_dir_start_cluster = " << +fat32->root_dir_start_cluster << "\n"
@@ -361,7 +361,7 @@ int main(int argc, char *argv[]) {
 		std::clog <<
 				"data_start_lsn = " << data_start_lsn << "\n"
 				"total_data_clusters = " << total_data_clusters <<
-					" (" << byte_count(total_data_clusters * cluster_size) << ")"
+					" (" << byte_count(uintmax_t { total_data_clusters } * cluster_size) << ")"
 					" [FAT" << fat_entry_width << "]\n";
 	}
 	std::clog.flush();
@@ -378,8 +378,15 @@ int main(int argc, char *argv[]) {
 			std::clog << argv[1] << ": FS Information Sector is invalid\n";
 		}
 		else if (verbose_option) {
-			std::clog <<
-					"fs_info.last_known_free_data_clusters = " << (fs_info->last_known_free_data_clusters == 0xFFFFFFFF ? std::hex : std::dec) << +fs_info->last_known_free_data_clusters << std::dec << "\n"
+			std::clog << "fs_info.last_known_free_data_clusters = ";
+			if (fs_info->last_known_free_data_clusters == 0xFFFFFFFF) {
+				std::clog << std::hex << +fs_info->last_known_free_data_clusters << std::dec;
+			}
+			else {
+				std::clog << +fs_info->last_known_free_data_clusters <<
+						" (" << byte_count(uintmax_t { fs_info->last_known_free_data_clusters } * cluster_size) << ')';
+			}
+			std::clog << "\n"
 					"fs_info.most_recently_allocated_data_cluster = " << (fs_info->most_recently_allocated_data_cluster == 0xFFFFFFFF ? std::hex : std::dec) << +fs_info->most_recently_allocated_data_cluster << std::dec << '\n';
 		}
 	}
