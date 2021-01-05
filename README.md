@@ -24,6 +24,10 @@ actions:
 	reread: re-read cluster; mark bad if different
 	zeroout: issue BLKZEROOUT ioctl on cluster
 		(elided if a previous "read" found cluster already zeroed)
+	readzeros: read cluster; mark bad if not zeroed
+	f3write: fill cluster with reproducible data
+		(elided if a previous "read" found cluster already correct)
+	f3read: read cluster; mark bad if subtly changed
 	secdiscard: issue BLKSECDISCARD ioctl on cluster
 	discard: issue BLKDISCARD ioctl on cluster
 	trash: fill cluster with pseudorandom garbage
@@ -41,9 +45,15 @@ For each free cluster (and, optionally, for each bad cluster), Flakyflash perfor
 
 * **`read`** – Reads the cluster from the media.
 
-* **`reread`** – Reads the cluster from the media again. If the data retrieved do not match the data retrieved by the previous `read` action (or written by the previous `zeroout` or `trash` action), then Flakyflash marks the cluster as bad and continues immediately to the next cluster. If no previous action had established a baseline for the current cluster, then `reread` implicitly performs a `read` first.
+* **`reread`** – Reads the cluster from the media again. If the data retrieved do not match the data retrieved by the previous `read` action (or written by the previous `zeroout`, `f3write`, or `trash` action), then Flakyflash marks the cluster as bad and continues immediately to the next cluster. If no previous action had established a baseline for the current cluster, then `reread` implicitly performs a `read` first.
 
 * **`zeroout`** – Issues a `BLKZEROOUT` `ioctl` on the cluster, which causes the kernel to overwrite the cluster on the media with null bytes. If a previous action had already established that the cluster contains only null bytes, then the `zeroout` action is skipped to avoid excessive writing to the flash media. The `zeroout` action itself establishes that the cluster contains only null bytes, which implies that multiple `zeroout` actions in a row will collapse to a single action.
+
+* **`readzeros`** – Reads the cluster from the media. If the data retrieved are not all null bytes, then Flakyflash marks the cluster as bad and continues immediately to the next cluster. This action may be used to check for spurious bit flips (a.k.a. "bit rot") if it is known for certain that the clusters should contain only null bytes, such as if a previous session of Flakyflash had zeroed them out using the `zeroout` action.
+
+* **`f3write`** – Overwrites the entire cluster on the media with reproducible data derived from the cluster's offset by the same linear congruential generator as [F3][] uses. If a previous action had already established that the cluster contains exactly these data, then the `f3write` action is skipped to avoid excessive writing to the flash media. The `f3write` action itself establishes that the cluster contains exactly these data, which implies that multiple `f3write` actions in a row will collapse to a single action.
+
+* **`f3read`** – Reads the cluster from the media and compares the data retrieved versus the data that the `f3write` action would write to the same cluster. If (and only if) more than zero but fewer than one eighth of the bits differ, then Flakyflash marks the cluster as bad and continues immediately to the next cluster. If the cluster appears to contain data that the `f3write` action would write to some other cluster, then Flakyflash emits a warning message suggesting that the flash media may be fraudulent. Otherwise, if more than one eighth of the bits differ from the intended data, then Flakyflash emits a warning message indicating that the cluster is corrupted. This action may be used to check for spurious bit flips (a.k.a. "bit rot") if it is known for certain that the clusters were most recently written using the `f3write` action.
 
 * **`secdiscard`** – Issues a `BLKSECDISCARD` `ioctl` on the cluster, which is supposed to cause the cluster to be erased irrecoverably, although hardware support for this is spotty. If the device does not support this action, then Flakyflash will emit an error message and abort with status code 134 (indicating `SIGABRT`).
 
@@ -84,6 +94,14 @@ Almost the same as the preceding example except that every free cluster is overw
 	flakyflash --free-clusters=zeroout,reread,trash,reread,zeroout,reread,discard /dev/sdX1
 
 Really exercises each free data cluster by overwriting it with null bytes, verifying that it reads back as all null bytes, overwriting it with pseudorandom garbage, verifying that the garbage reads back correctly, overwriting it null bytes again, verifying that it reads back as all null bytes, and finally discarding it. This will very likely detect most weak clusters except if the device has an onboard cache.
+
+	flakyflash --free-clusters=read,f3write,reread /dev/sdX1
+
+Reads each free data cluster, and if it does not already contain exactly the data that `f3write` would write to it, then overwrites the cluster with those deterministic data. Re-reads the cluster afterward, and if it does not then contain the intended data, then marks the cluster as bad. This may be used to prepare the media for a data retention test. After thusly preparing the media, it should be placed in storage for a period of time. Upon retrieval of the media from storage, the next example shall conclude the test.
+
+	flakyflash --free-clusters=f3read /dev/sdX1
+
+Reads each free data cluster and verifies that it contains the same deterministic data that the previous example wrote to it. Marks as bad any clusters whose data have changed subtly since they were written. Emits warnings about any clusters whose data have changed more than subtly or whose data were supposed to have been written to some other cluster. These latter cases may indicate that the flash media is fraudulent, and [F3][] may be further employed to diagnose such media.
 
 	flakyflash --bad-clusters=free,read,reread --free-clusters= /dev/sdX1
 

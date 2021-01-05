@@ -1,14 +1,18 @@
+#include <bit>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 
 #include <sysexits.h>
 #include <linux/fs.h>
 #include <sys/random.h>
 
 #include "common/cli.h"
+#include "common/compiler.h"
 #include "common/endian.h"
 #include "common/fd.h"
 #include "common/format.h"
@@ -139,11 +143,33 @@ static void getrandom_fully(void *buf, size_t buflen, unsigned flags = 0) {
 	throw std::system_error(errno, std::system_category(), "getrandom");
 }
 
+static bool f3_fill(void *buf, size_t size, uint64_t x) noexcept {
+	bool changed = false;
+	auto vec = static_cast<le<uint64_t> *>(buf);
+	size_t n = size / sizeof *vec;
+	assert(n * sizeof *vec == size);
+	for (size_t i = 0; i < n; ++i) {
+		changed |= std::exchange(vec[i], x) != x;
+		x = x * UINT64_C(0x10000000F) + 17;
+	}
+	return changed;
+}
+
+static size_t _pure count_flipped_bits(const void *buf1, const void *buf2, size_t size) noexcept {
+	auto words1 = static_cast<const unsigned long *>(buf1), words2 = static_cast<const unsigned long *>(buf2);
+	size_t n = size / sizeof(unsigned long);
+	assert(n * sizeof(unsigned long) == size);
+	return std::inner_product(words1, words1 + n, words2, size_t { }, std::plus { },
+			[](unsigned long x, unsigned long y) noexcept {
+				return std::popcount(x ^ y);
+			});
+}
+
 enum class Action {
-	READ, REREAD, ZEROOUT, SECDISCARD, DISCARD, TRASH, BAD, FREE
+	READ, REREAD, ZEROOUT, READZEROS, F3WRITE, F3READ, SECDISCARD, DISCARD, TRASH, BAD, FREE
 };
 
-static Action parse_action(std::string_view sv) {
+static Action _pure parse_action(std::string_view sv) {
 	if (sv == "read") {
 		return Action::READ;
 	}
@@ -152,6 +178,15 @@ static Action parse_action(std::string_view sv) {
 	}
 	if (sv == "zeroout") {
 		return Action::ZEROOUT;
+	}
+	if (sv == "readzeros") {
+		return Action::READZEROS;
+	}
+	if (sv == "f3write") {
+		return Action::F3WRITE;
+	}
+	if (sv == "f3read") {
+		return Action::F3READ;
 	}
 	if (sv == "secdiscard") {
 		return Action::SECDISCARD;
@@ -214,6 +249,10 @@ int main(int argc, char *argv[]) {
 				"\treread: re-read cluster; mark bad if different\n"
 				"\tzeroout: issue BLKZEROOUT ioctl on cluster\n"
 				"\t         (elided if a previous \"read\" found cluster already zeroed)\n"
+				"\treadzeros: read cluster; mark bad if not zeroed\n"
+				"\tf3write: fill cluster with reproducible data\n"
+				"\t         (elided if a previous \"read\" found cluster already correct)\n"
+				"\tf3read: read cluster; mark bad if subtly changed\n"
 				"\tsecdiscard: issue BLKSECDISCARD ioctl on cluster\n"
 				"\tdiscard: issue BLKDISCARD ioctl on cluster\n"
 				"\ttrash: fill cluster with pseudorandom garbage\n"
@@ -478,7 +517,7 @@ int main(int argc, char *argv[]) {
 		return EX_OK;
 	}
 
-	uint32_t marked_bad = 0, marked_free = 0, zeroed_out = 0, discarded = 0, trashed = 0;
+	uint32_t marked_bad = 0, marked_free = 0, zeroed_out = 0, discarded = 0, trashed = 0, misplaced = 0;
 	auto const buf1 = new(std::align_val_t(page_size)) std::byte[cluster_size];
 	auto const buf2 = new(std::align_val_t(page_size)) std::byte[cluster_size];
 	for (uint32_t cluster = 2, progress = 0; cluster <= max_cluster; ++cluster) {
@@ -515,6 +554,10 @@ int main(int argc, char *argv[]) {
 						goto error;
 					}
 					break;
+				case Action::READZEROS:
+					std::memset(buf1, 0, cluster_size);
+					buf1_valid = true;
+					[[fallthrough]];
 				case Action::REREAD:
 					try {
 						if (!buf1_valid) {
@@ -553,6 +596,40 @@ int main(int argc, char *argv[]) {
 						}
 					}
 					break;
+				case Action::F3WRITE:
+					if (f3_fill(buf1, cluster_size, offset) || !buf1_valid) {
+						goto write_trash;
+					}
+					break;
+				case Action::F3READ:
+					try {
+						fd.pread_fully(buf1, cluster_size, offset);
+						buf1_valid = true;
+					}
+					catch (const std::system_error &e) {
+						if (e.code().value() != EIO) {
+							throw;
+						}
+						std::clog << "\rerror while reading";
+						goto error;
+					}
+					f3_fill(buf2, cluster_size, offset);
+					if (std::memcmp(buf1, buf2, cluster_size) != 0) {
+						if (count_flipped_bits(buf1, buf2, cluster_size) > cluster_size) {
+							if (off_t found_offset = static_cast<off_t>(*reinterpret_cast<le<uint64_t> *>(buf1));
+							    found_offset != offset && !f3_fill(buf1, cluster_size, found_offset))
+							{
+								std::clog << "\rdata intended for offset " << std::hex << found_offset << std::dec << " were found in";
+								++misplaced;
+								goto warning;
+							}
+							std::clog << "\rcorrupted";
+							goto warning;
+						}
+						std::clog << "\rflaky";
+						goto error;
+					}
+					break;
 				case Action::SECDISCARD:
 				case Action::DISCARD:
 					try {
@@ -571,6 +648,7 @@ int main(int argc, char *argv[]) {
 					break;
 				case Action::TRASH:
 					getrandom_fully(buf1, cluster_size);
+write_trash:
 					try {
 						fd.pwrite_fully(buf1, cluster_size, offset);
 						++trashed;
@@ -600,6 +678,7 @@ error:
 		else {
 			std::clog << "\rmarking " << (new_entry ? "bad" : "free");
 		}
+warning:
 		std::clog << " cluster #" << cluster << " at offset " << std::hex << offset << std::dec << std::endl;
 		if (new_entry != entry) {
 			put_fat_entry(fat, cluster, new_entry);
@@ -640,6 +719,13 @@ error:
 	if (trashed || verbose_option) {
 		std::clog << trashed << " cluster" << (trashed == 1 ? "" : "s") <<
 				" (" << byte_count(uintmax_t { trashed } << cluster_shift) << ") trashed\n";
+	}
+	if (misplaced) {
+		std::clog << misplaced << " cluster" << (misplaced == 1 ? "" : "s") <<
+				" contained data intended for other clusters. This may\n"
+				"indicate that your flash media is fraudulent. For more information, see\n"
+				"https://github.com/AltraMayor/f3." << std::endl;
+		return 2;
 	}
 	std::clog.flush();
 	return !!marked_bad;
