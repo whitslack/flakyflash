@@ -26,57 +26,78 @@ namespace std {
 
 
 struct BootSector {
-	std::byte jump_instruction[3];
-	char oem_name[8];
-	le_packed<uint16_t> bytes_per_logical_sector;
-	uint8_t logical_sectors_per_cluster;
-	le_packed<uint16_t> reserved_logical_sectors;
-	uint8_t fats;
-	le_packed<uint16_t> root_dir_entries;
-	le_packed<uint16_t> old_total_logical_sectors;
-	std::byte media_descriptor;
-	le_packed<uint16_t> logical_sectors_per_fat;
-	le_packed<uint16_t> physical_sectors_per_track;
-	le_packed<uint16_t> heads;
-	le_packed<uint32_t> hidden_sectors;
-	le_packed<uint32_t> total_logical_sectors;
-	std::byte padding[0x1FD - 0x024];
+
+#pragma pack(push, 1)
+	struct BPB {
+		le<uint16_t> bytes_per_logical_sector; // BPB_BytsPerSec
+		uint8_t logical_sectors_per_cluster; // BPB_SecPerClus
+		le<uint16_t> reserved_logical_sectors; // BPB_RsvdSecCnt
+		uint8_t fats; // BPB_NumFATs
+		le<uint16_t> root_dir_entries; // BPB_RootEntCnt
+		le<uint16_t> old_total_logical_sectors; // BPB_TotSec16
+		std::byte media_descriptor; // BPB_Media
+		le<uint16_t> logical_sectors_per_fat; // BPB_FATSz16
+		le<uint16_t> physical_sectors_per_track; // BPB_SecPerTrk
+		le<uint16_t> heads; // BPB_NumHeads
+		le<uint32_t> hidden_sectors; // BPB_HiddSec
+		le<uint32_t> total_logical_sectors; // BPB_TotSec32
+	};
+	static_assert(sizeof(struct BPB) == 25);
+
+	struct EBPB {
+		uint8_t physical_drive_number; // BS_DrvNum
+		std::byte reserved; // BS_Reserved1
+		std::byte extended_boot_signature; // BS_BootSig
+		le<uint32_t> volume_id; // BS_VolID
+		char volume_label[11]; // BS_VolLab
+		char file_system_type[8]; // BS_FilSysType
+	};
+	static_assert(sizeof(struct EBPB) == 26);
+#pragma pack(pop)
+
+	struct FATParams {
+		struct EBPB ebpb;
+		std::byte opaque[0x1FC - 0x03E];
+	};
+	static_assert(sizeof(struct FATParams) == 512 - (3 + 8 + 25) - (1 + 1 + 2));
+
+	struct FAT32Params {
+		le<uint32_t> logical_sectors_per_fat; // BPB_FATSz32
+		le<uint16_t> mirroring_flags; // BPB_ExtFlags
+		le<uint16_t> version; // BPB_FSVer
+		le<uint32_t> root_dir_start_cluster; // BPB_RootClus
+		le<uint16_t> fs_info_lsn; // BPB_FSInfo
+		le<uint16_t> boot_sector_backup_lsn; // BPB_BkBootSec
+		std::byte reserved[12]; // BPB_Reserved
+		struct EBPB ebpb;
+		std::byte opaque[0x1FC - 0x05A];
+	};
+	static_assert(sizeof(struct FAT32Params) == 512 - (3 + 8 + 25) - (1 + 1 + 2));
+
+	std::byte jump_instruction[3]; // BS_jmpBoot
+	char oem_name[8]; // BS_OEMName
+	struct BPB bpb;
+	union {
+		struct FATParams fat;
+		struct FAT32Params fat32;
+	};
+	std::byte padding;
 	uint8_t old_physical_drive_number;
 	std::byte boot_sector_signature[2]; // 0x55, 0xAA
 };
-static_assert(sizeof(BootSector) == 512);
+static_assert(sizeof(struct BootSector) == 512);
 
-struct FAT32Params {
-	le_packed<uint32_t> logical_sectors_per_fat;
-	le_packed<uint16_t> mirroring_flags;
-	le_packed<uint16_t> version;
-	le_packed<uint32_t> root_dir_start_cluster;
-	le_packed<uint16_t> fs_info_lsn;
-	le_packed<uint16_t> boot_sector_backup_lsn;
-	std::byte reserved[12];
-};
-static_assert(sizeof(FAT32Params) == 28);
-
-struct EBPB {
-	uint8_t physical_drive_number;
-	std::byte reserved;
-	std::byte extended_boot_signature;
-	le_packed<uint32_t> volume_id;
-	char volume_label[11];
-	char file_system_type[8];
-};
-static_assert(sizeof(EBPB) == 26);
 
 struct FSInfoSector {
-	std::byte fs_info_sector_signature1[4]; // "RRaA"
-	std::byte reserved1[480];
-	std::byte fs_info_sector_signature2[4]; // "rrAa"
-	le_packed<uint32_t> last_known_free_data_clusters;
-	le_packed<uint32_t> most_recently_allocated_data_cluster;
-	std::byte reserved2[12];
-	std::byte fs_info_sector_signature3[4]; // 0x00, 0x00, 0x55, 0xAA
+	std::byte fs_info_sector_signature1[4]; // FSI_LeadSig: "RRaA"
+	std::byte reserved1[480]; // FSI_Reserved1
+	std::byte fs_info_sector_signature2[4]; // FSI_StrucSig: "rrAa"
+	le<uint32_t> last_known_free_data_clusters; // FSI_Free_Count
+	le<uint32_t> most_recently_allocated_data_cluster; // FSI_Nxt_Free
+	std::byte reserved2[12]; // FSI_Reserved2
+	std::byte fs_info_sector_signature3[4]; // FSI_TrailSig: 0x00, 0x00, 0x55, 0xAA
 };
-static_assert(sizeof(FSInfoSector) == 512);
+static_assert(sizeof(struct FSInfoSector) == 512);
 
 
 static std::ostream & operator<<(std::ostream &os, std::byte b) {
@@ -214,21 +235,22 @@ int main(int argc, char *argv[]) {
 	auto const bs = new(std::align_val_t(page_size)) struct BootSector;
 	fd.pread_fully(bs, sizeof *bs, 0);
 	uint32_t total_logical_sectors, logical_sectors_per_fat;
-	const struct FAT32Params *fat32 = nullptr;
+	const struct BootSector::BPB *bpb = &bs->bpb;
+	const struct BootSector::FAT32Params *fat32 = nullptr;
 	if (bs->boot_sector_signature[0] != static_cast<std::byte>(0x55) ||
 		bs->boot_sector_signature[1] != static_cast<std::byte>(0xAA) ||
 		std::memcmp(bs->oem_name, "EXFAT   ", 8) == 0 ||
 		std::memcmp(bs->oem_name, "NTFS    ", 8) == 0 ||
-		!std::has_single_bit(letoh(bs->bytes_per_logical_sector)) ||
-		!std::has_single_bit(bs->logical_sectors_per_cluster) ||
-		bs->reserved_logical_sectors == uint16_t(0) ||
-		bs->fats == 0 ||
-		static_cast<uint8_t>(bs->media_descriptor) < 0xF8 &&
-			bs->media_descriptor != static_cast<std::byte>(0xF0) ||
-		(total_logical_sectors = bs->old_total_logical_sectors) == 0 &&
-			(total_logical_sectors = bs->total_logical_sectors) == 0 ||
-		(logical_sectors_per_fat = bs->logical_sectors_per_fat) == 0 &&
-			(logical_sectors_per_fat = (fat32 = reinterpret_cast<const FAT32Params *>(bs->padding))->logical_sectors_per_fat) == 0)
+		!std::has_single_bit(letoh(bpb->bytes_per_logical_sector)) ||
+		!std::has_single_bit(bpb->logical_sectors_per_cluster) ||
+		bpb->reserved_logical_sectors == uint16_t(0) ||
+		bpb->fats == 0 ||
+		static_cast<uint8_t>(bpb->media_descriptor) < 0xF8 &&
+			bpb->media_descriptor != static_cast<std::byte>(0xF0) ||
+		(total_logical_sectors = bpb->old_total_logical_sectors) == 0 &&
+			(total_logical_sectors = bpb->total_logical_sectors) == 0 ||
+		(logical_sectors_per_fat = bpb->logical_sectors_per_fat) == 0 &&
+			(logical_sectors_per_fat = (fat32 = &bs->fat32)->logical_sectors_per_fat) == 0)
 	{
 		std::clog << argv[1] << ": device does not contain a FAT file system" << std::endl;
 		return EX_DATAERR;
@@ -238,11 +260,11 @@ int main(int argc, char *argv[]) {
 		return EX_DATAERR;
 	}
 	unsigned active_fat = 0;
-	if (fat32 && (fat32->mirroring_flags & 0x80) && (active_fat = fat32->mirroring_flags & 0xF) >= bs->fats) {
-		std::clog << argv[1] << ": active FAT #" << active_fat << " does not exist on a volume with " << +bs->fats << " FAT" << (bs->fats == 1 ? "" : "s") << std::endl;
+	if (fat32 && (fat32->mirroring_flags & 0x80) && (active_fat = fat32->mirroring_flags & 0xF) >= bpb->fats) {
+		std::clog << argv[1] << ": active FAT #" << active_fat << " does not exist on a volume with " << +bpb->fats << " FAT" << (bpb->fats == 1 ? "" : "s") << std::endl;
 		return EX_DATAERR;
 	}
-	auto ebpb = reinterpret_cast<const struct EBPB *>(bs->padding + (fat32 ? sizeof *fat32 : 0));
+	auto ebpb = fat32 ? &fat32->ebpb : &bs->fat.ebpb;
 	if (ebpb->extended_boot_signature != static_cast<std::byte>(0x29) &&
 		ebpb->extended_boot_signature != static_cast<std::byte>(0x28))
 	{
@@ -252,30 +274,30 @@ int main(int argc, char *argv[]) {
 		std::clog <<
 				"bs.jump_instruction = " << bs->jump_instruction << "\n"
 				"bs.oem_name = " << std::quoted(std::string_view { bs->oem_name, sizeof bs->oem_name }) << "\n"
-				"bs.bytes_per_logical_sector = " << +bs->bytes_per_logical_sector << "\n"
-				"bs.logical_sectors_per_cluster = " << +bs->logical_sectors_per_cluster <<
-					" (" << byte_count(bs->logical_sectors_per_cluster * bs->bytes_per_logical_sector) << ")\n"
-				"bs.reserved_logical_sectors = " << +bs->reserved_logical_sectors <<
-					" (" << byte_count(bs->reserved_logical_sectors * bs->bytes_per_logical_sector) << ")\n"
-				"bs.fats = " << +bs->fats << "\n"
-				"bs.root_dir_entries = " << +bs->root_dir_entries << "\n"
-				"bs.old_total_logical_sectors = " << +bs->old_total_logical_sectors <<
-					" (" << byte_count(bs->old_total_logical_sectors * bs->bytes_per_logical_sector) << ")\n"
-				"bs.media_descriptor = " << bs->media_descriptor << "\n"
-				"bs.logical_sectors_per_fat = " << +bs->logical_sectors_per_fat <<
-					" (" << byte_count(bs->logical_sectors_per_fat * bs->bytes_per_logical_sector) << ")\n"
-				"bs.physical_sectors_per_track = " << +bs->physical_sectors_per_track << "\n"
-				"bs.heads = " << +bs->heads << '\n';
-		if (bs->old_total_logical_sectors == uint16_t(0)) {
+				"bpb.bytes_per_logical_sector = " << +bpb->bytes_per_logical_sector << "\n"
+				"bpb.logical_sectors_per_cluster = " << +bpb->logical_sectors_per_cluster <<
+					" (" << byte_count(bpb->logical_sectors_per_cluster * bpb->bytes_per_logical_sector) << ")\n"
+				"bpb.reserved_logical_sectors = " << +bpb->reserved_logical_sectors <<
+					" (" << byte_count(bpb->reserved_logical_sectors * bpb->bytes_per_logical_sector) << ")\n"
+				"bpb.fats = " << +bpb->fats << "\n"
+				"bpb.root_dir_entries = " << +bpb->root_dir_entries << "\n"
+				"bpb.old_total_logical_sectors = " << +bpb->old_total_logical_sectors <<
+					" (" << byte_count(bpb->old_total_logical_sectors * bpb->bytes_per_logical_sector) << ")\n"
+				"bpb.media_descriptor = " << bpb->media_descriptor << "\n"
+				"bpb.logical_sectors_per_fat = " << +bpb->logical_sectors_per_fat <<
+					" (" << byte_count(bpb->logical_sectors_per_fat * bpb->bytes_per_logical_sector) << ")\n"
+				"bpb.physical_sectors_per_track = " << +bpb->physical_sectors_per_track << "\n"
+				"bpb.heads = " << +bpb->heads << '\n';
+		if (bpb->old_total_logical_sectors == uint16_t(0)) {
 			std::clog <<
-					"bs.hidden_sectors = " << +bs->hidden_sectors << "\n"
-					"bs.total_logical_sectors = " << +bs->total_logical_sectors <<
-						" (" << byte_count(uintmax_t { bs->total_logical_sectors } * bs->bytes_per_logical_sector) << ")\n";
+					"bpb.hidden_sectors = " << +bpb->hidden_sectors << "\n"
+					"bpb.total_logical_sectors = " << +bpb->total_logical_sectors <<
+						" (" << byte_count(uintmax_t { bpb->total_logical_sectors } * bpb->bytes_per_logical_sector) << ")\n";
 		}
 		if (fat32) {
 			std::clog <<
 					"fat32.logical_sectors_per_fat = " << +fat32->logical_sectors_per_fat <<
-						" (" << byte_count(uintmax_t { fat32->logical_sectors_per_fat } * bs->bytes_per_logical_sector) << ")\n"
+						" (" << byte_count(uintmax_t { fat32->logical_sectors_per_fat } * bpb->bytes_per_logical_sector) << ")\n"
 					"fat32.mirroring_flags = " << std::hex << +fat32->mirroring_flags << std::dec << "\n"
 					"fat32.version = " << fat_version(fat32->version) << "\n"
 					"fat32.root_dir_start_cluster = " << +fat32->root_dir_start_cluster << "\n"
@@ -300,8 +322,8 @@ int main(int argc, char *argv[]) {
 				"bs.boot_sector_signature = " << bs->boot_sector_signature << '\n';
 	}
 
-	const uint32_t data_start_lsn = bs->reserved_logical_sectors + bs->fats * logical_sectors_per_fat + (bs->root_dir_entries * 32 + bs->bytes_per_logical_sector - 1) / bs->bytes_per_logical_sector;
-	const uint32_t total_data_clusters = (total_logical_sectors - data_start_lsn) / bs->logical_sectors_per_cluster;
+	const uint32_t data_start_lsn = bpb->reserved_logical_sectors + bpb->fats * logical_sectors_per_fat + (bpb->root_dir_entries * 32 + bpb->bytes_per_logical_sector - 1) / bpb->bytes_per_logical_sector;
+	const uint32_t total_data_clusters = (total_logical_sectors - data_start_lsn) / bpb->logical_sectors_per_cluster;
 	uint32_t (*get_fat_entry)(const void *fat, uint32_t cluster) noexcept;
 	void (*put_fat_entry)(void *fat, uint32_t cluster, uint32_t next);
 	uint32_t fat_entry_width, expected_fat_id, bad_cluster, min_fat_size;
@@ -330,7 +352,7 @@ int main(int argc, char *argv[]) {
 			}
 		};
 		fat_entry_width = 12;
-		expected_fat_id = 0xF00 | static_cast<uint8_t>(bs->media_descriptor);
+		expected_fat_id = 0xF00 | static_cast<uint8_t>(bpb->media_descriptor);
 		bad_cluster = 0xFF7;
 		min_fat_size = ((total_data_clusters + 2) * 3 + 1) / 2;
 	}
@@ -345,7 +367,7 @@ int main(int argc, char *argv[]) {
 			static_cast<le<uint16_t> *>(fat)[cluster] = static_cast<uint16_t>(next);
 		};
 		fat_entry_width = 16;
-		expected_fat_id = 0xFF00 | static_cast<uint8_t>(bs->media_descriptor);
+		expected_fat_id = 0xFF00 | static_cast<uint8_t>(bpb->media_descriptor);
 		bad_cluster = 0xFFF7;
 		min_fat_size = (total_data_clusters + 2) * sizeof(uint16_t);
 	}
@@ -361,15 +383,15 @@ int main(int argc, char *argv[]) {
 			entry = entry & ~0x0FFFFFFF | next;
 		};
 		fat_entry_width = 32;
-		expected_fat_id = 0x0FFFFF00 | static_cast<uint8_t>(bs->media_descriptor);
+		expected_fat_id = 0x0FFFFF00 | static_cast<uint8_t>(bpb->media_descriptor);
 		bad_cluster = 0x0FFFFFF7;
 		min_fat_size = (total_data_clusters + 2) * sizeof(uint32_t);
 	}
-	if (logical_sectors_per_fat < (min_fat_size + bs->bytes_per_logical_sector - 1) / bs->bytes_per_logical_sector) {
+	if (logical_sectors_per_fat < (min_fat_size + bpb->bytes_per_logical_sector - 1) / bpb->bytes_per_logical_sector) {
 		std::clog << argv[1] << ": logical_sectors_per_fat=" << logical_sectors_per_fat << " is too small for total_data_clusters=" << total_data_clusters << std::endl;
 		return EX_DATAERR;
 	}
-	const size_t cluster_size = bs->logical_sectors_per_cluster * bs->bytes_per_logical_sector;
+	const size_t cluster_size = bpb->logical_sectors_per_cluster * bpb->bytes_per_logical_sector;
 	if (verbose_option) {
 		std::clog <<
 				"data_start_lsn = " << data_start_lsn << "\n"
@@ -379,10 +401,10 @@ int main(int argc, char *argv[]) {
 	}
 	std::clog.flush();
 
-	FSInfoSector *fs_info = nullptr;
+	struct FSInfoSector *fs_info = nullptr;
 	if (fat32 && fat32->fs_info_lsn != uint16_t(0) && fat32->fs_info_lsn != uint16_t(0xFFFF)) {
 		fs_info = new(std::align_val_t(page_size)) struct FSInfoSector;
-		fd.pread_fully(fs_info, sizeof *fs_info, fat32->fs_info_lsn * bs->bytes_per_logical_sector);
+		fd.pread_fully(fs_info, sizeof *fs_info, fat32->fs_info_lsn * bpb->bytes_per_logical_sector);
 		if (std::memcmp(fs_info->fs_info_sector_signature1, "RRaA", 4) != 0 ||
 			std::memcmp(fs_info->fs_info_sector_signature2, "rrAa", 4) != 0 ||
 			std::memcmp(fs_info->fs_info_sector_signature3, "\0\0\x55\xAA", 4) != 0)
@@ -405,9 +427,9 @@ int main(int argc, char *argv[]) {
 	}
 	std::clog.flush();
 
-	const size_t fat_size = logical_sectors_per_fat * bs->bytes_per_logical_sector;
+	const size_t fat_size = logical_sectors_per_fat * bpb->bytes_per_logical_sector;
 	auto const fat = new(std::align_val_t(page_size)) std::byte[fat_size];
-	fd.pread_fully(fat, fat_size, bs->reserved_logical_sectors * bs->bytes_per_logical_sector + active_fat * fat_size);
+	fd.pread_fully(fat, fat_size, bpb->reserved_logical_sectors * bpb->bytes_per_logical_sector + active_fat * fat_size);
 	if (auto entry = get_fat_entry(fat, 0); entry != expected_fat_id) {
 		std::clog << argv[1] << ": FAT ID is " << std::hex << entry << " but should be " << expected_fat_id << std::dec << '\n';
 	}
@@ -462,7 +484,7 @@ int main(int argc, char *argv[]) {
 			uint32_t total = free_clusters + bad_clusters;
 			std::clog.put('\r') << static_cast<unsigned>((uint64_t { progress } * 100 + total / 2) / total) << '%' << std::flush;
 		}
-		const off_t offset = (data_start_lsn + off_t { cluster - 2 } * bs->logical_sectors_per_cluster) * bs->bytes_per_logical_sector;
+		const off_t offset = (data_start_lsn + off_t { cluster - 2 } * bpb->logical_sectors_per_cluster) * bpb->bytes_per_logical_sector;
 		bool buf1_valid = false;
 		auto new_entry = entry;
 		for (Action action : *actions) {
@@ -576,13 +598,13 @@ error:
 	}
 	std::clog << "\r\033[K";
 	if (marked_bad || marked_free) {
-		std::clog << "writing modified FAT" << (bs->fats == 1 ? "" : "s") << "... " << std::flush;
-		for (unsigned fat_idx = 0; fat_idx < bs->fats; ++fat_idx) {
-			fd.pwrite_fully(fat, fat_size, bs->reserved_logical_sectors * bs->bytes_per_logical_sector + fat_idx * fat_size);
+		std::clog << "writing modified FAT" << (bpb->fats == 1 ? "" : "s") << "... " << std::flush;
+		for (unsigned fat_idx = 0; fat_idx < bpb->fats; ++fat_idx) {
+			fd.pwrite_fully(fat, fat_size, bpb->reserved_logical_sectors * bpb->bytes_per_logical_sector + fat_idx * fat_size);
 		}
 		if (fs_info && marked_bad != marked_free) {
 			fs_info->last_known_free_data_clusters = free_clusters - marked_bad + marked_free;
-			fd.pwrite_fully(fs_info, sizeof *fs_info, fat32->fs_info_lsn * bs->bytes_per_logical_sector);
+			fd.pwrite_fully(fs_info, sizeof *fs_info, fat32->fs_info_lsn * bpb->bytes_per_logical_sector);
 		}
 		std::clog << "done." << std::endl;
 	}
