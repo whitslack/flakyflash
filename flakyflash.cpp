@@ -255,20 +255,32 @@ int main(int argc, char *argv[]) {
 		std::clog << argv[1] << ": device does not contain a FAT file system" << std::endl;
 		return EX_DATAERR;
 	}
-	if (fat32 && fat32->version != uint16_t(0)) {
-		std::clog << argv[1] << ": device contains unsupported FAT32 version " << fat_version(fat32->version) << std::endl;
-		return EX_DATAERR;
-	}
+	const uint32_t data_start_lsn = bpb->reserved_logical_sectors + bpb->fats * logical_sectors_per_fat + (bpb->root_dir_entries * 32 + bpb->bytes_per_logical_sector - 1) / bpb->bytes_per_logical_sector;
+	const uint32_t total_data_clusters = (total_logical_sectors - data_start_lsn) / bpb->logical_sectors_per_cluster;
+	const size_t cluster_size = bpb->logical_sectors_per_cluster * bpb->bytes_per_logical_sector;
 	unsigned active_fat = 0;
-	if (fat32 && (fat32->mirroring_flags & 0x80) && (active_fat = fat32->mirroring_flags & 0xF) >= bpb->fats) {
-		std::clog << argv[1] << ": active FAT #" << active_fat << " does not exist on a volume with " << +bpb->fats << " FAT" << (bpb->fats == 1 ? "" : "s") << std::endl;
-		return EX_DATAERR;
+	const struct BootSector::EBPB *ebpb;
+	if (fat32) {
+		if (fat32->version != uint16_t(0)) {
+			std::clog << argv[1] << ": device contains unsupported FAT32 version " << fat_version(fat32->version) << std::endl;
+			return EX_DATAERR;
+		}
+		if (fat32->mirroring_flags & 0x80) {
+			active_fat = fat32->mirroring_flags & 0xF;
+		}
+		ebpb = &fat32->ebpb;
 	}
-	auto ebpb = fat32 ? &fat32->ebpb : &bs->fat.ebpb;
+	else {
+		ebpb = &bs->fat.ebpb;
+	}
 	if (ebpb->extended_boot_signature != static_cast<std::byte>(0x29) &&
 		ebpb->extended_boot_signature != static_cast<std::byte>(0x28))
 	{
 		ebpb = nullptr;
+	}
+	if (active_fat >= bpb->fats) {
+		std::clog << argv[1] << ": active FAT #" << active_fat << " does not exist on a volume with " << +bpb->fats << " FAT" << (bpb->fats == 1 ? "" : "s") << std::endl;
+		return EX_DATAERR;
 	}
 	if (verbose_option) {
 		std::clog <<
@@ -319,14 +331,16 @@ int main(int argc, char *argv[]) {
 		}
 		std::clog <<
 				"bs.old_physical_drive_number = " << +bs->old_physical_drive_number << "\n"
-				"bs.boot_sector_signature = " << bs->boot_sector_signature << '\n';
+				"bs.boot_sector_signature = " << bs->boot_sector_signature << "\n"
+				"data_start_lsn = " << data_start_lsn << "\n"
+				"total_data_clusters = " << total_data_clusters <<
+					" (" << byte_count(uintmax_t { total_data_clusters } * cluster_size) << ')';
 	}
 
-	const uint32_t data_start_lsn = bpb->reserved_logical_sectors + bpb->fats * logical_sectors_per_fat + (bpb->root_dir_entries * 32 + bpb->bytes_per_logical_sector - 1) / bpb->bytes_per_logical_sector;
-	const uint32_t total_data_clusters = (total_logical_sectors - data_start_lsn) / bpb->logical_sectors_per_cluster;
 	uint32_t (*get_fat_entry)(const void *fat, uint32_t cluster) noexcept;
 	void (*put_fat_entry)(void *fat, uint32_t cluster, uint32_t next);
-	uint32_t fat_entry_width, expected_fat_id, bad_cluster, min_fat_size;
+	uint32_t expected_fat_id, bad_cluster, min_fat_size;
+	unsigned fat_entry_width;
 	if (total_data_clusters < 4085) {
 		get_fat_entry = [](const void *fat, uint32_t cluster) noexcept -> uint32_t {
 			auto row = static_cast<const uint8_t *>(fat) + cluster / 2 * 3;
@@ -351,10 +365,10 @@ int main(int argc, char *argv[]) {
 				row[1] = static_cast<uint8_t>(row[1] & 0xF0 | next >> 8);
 			}
 		};
-		fat_entry_width = 12;
 		expected_fat_id = 0xF00 | static_cast<uint8_t>(bpb->media_descriptor);
 		bad_cluster = 0xFF7;
 		min_fat_size = ((total_data_clusters + 2) * 3 + 1) / 2;
+		fat_entry_width = 12;
 	}
 	else if (total_data_clusters < 65525) {
 		get_fat_entry = [](const void *fat, uint32_t cluster) noexcept -> uint32_t {
@@ -366,10 +380,10 @@ int main(int argc, char *argv[]) {
 			}
 			static_cast<le<uint16_t> *>(fat)[cluster] = static_cast<uint16_t>(next);
 		};
-		fat_entry_width = 16;
 		expected_fat_id = 0xFF00 | static_cast<uint8_t>(bpb->media_descriptor);
 		bad_cluster = 0xFFF7;
 		min_fat_size = (total_data_clusters + 2) * sizeof(uint16_t);
+		fat_entry_width = 16;
 	}
 	else {
 		get_fat_entry = [](const void *fat, uint32_t cluster) noexcept -> uint32_t {
@@ -382,22 +396,17 @@ int main(int argc, char *argv[]) {
 			auto &entry = static_cast<le<uint32_t> *>(fat)[cluster];
 			entry = entry & ~0x0FFFFFFF | next;
 		};
-		fat_entry_width = 32;
 		expected_fat_id = 0x0FFFFF00 | static_cast<uint8_t>(bpb->media_descriptor);
 		bad_cluster = 0x0FFFFFF7;
 		min_fat_size = (total_data_clusters + 2) * sizeof(uint32_t);
+		fat_entry_width = 32;
+	}
+	if (verbose_option) {
+		std::clog << " [FAT" << fat_entry_width << "]\n";
 	}
 	if (logical_sectors_per_fat < (min_fat_size + bpb->bytes_per_logical_sector - 1) / bpb->bytes_per_logical_sector) {
 		std::clog << argv[1] << ": logical_sectors_per_fat=" << logical_sectors_per_fat << " is too small for total_data_clusters=" << total_data_clusters << std::endl;
 		return EX_DATAERR;
-	}
-	const size_t cluster_size = bpb->logical_sectors_per_cluster * bpb->bytes_per_logical_sector;
-	if (verbose_option) {
-		std::clog <<
-				"data_start_lsn = " << data_start_lsn << "\n"
-				"total_data_clusters = " << total_data_clusters <<
-					" (" << byte_count(uintmax_t { total_data_clusters } * cluster_size) << ")"
-					" [FAT" << fat_entry_width << "]\n";
 	}
 	std::clog.flush();
 
