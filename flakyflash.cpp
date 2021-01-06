@@ -446,7 +446,8 @@ int main(int argc, char *argv[]) {
 			continue;
 		}
 		if (++progress % 1024 == 0) {
-			std::clog.put('\r') << static_cast<unsigned>(std::round(static_cast<double>(progress) / (free_clusters + bad_clusters) * 100)) << '%' << std::flush;
+			uint32_t total = free_clusters + bad_clusters;
+			std::clog.put('\r') << static_cast<unsigned>((uint64_t { progress } * 100 + total / 2) / total) << '%' << std::flush;
 		}
 		const off_t offset = (data_start_lsn + off_t { cluster - 2 } * bs->logical_sectors_per_cluster) * bs->bytes_per_logical_sector;
 		bool buf1_valid = false;
