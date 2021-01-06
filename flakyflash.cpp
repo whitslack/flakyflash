@@ -400,7 +400,7 @@ int main(int argc, char *argv[]) {
 	}
 	const uint32_t max_cluster = total_data_clusters + 1;
 	uint32_t free_clusters = 0, bad_clusters = 0, used_clusters = 0;
-	for (uint32_t cluster = 0; cluster <= max_cluster; ++cluster) {
+	for (uint32_t cluster = 2; cluster <= max_cluster; ++cluster) {
 		auto entry = get_fat_entry(fat, cluster);
 		if (entry == 0) {
 			++free_clusters;
