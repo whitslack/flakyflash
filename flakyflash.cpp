@@ -235,14 +235,17 @@ int main(int argc, char *argv[]) {
 	auto const bs = new(std::align_val_t(page_size)) struct BootSector;
 	fd.pread_fully(bs, sizeof *bs, 0);
 	uint32_t total_logical_sectors, logical_sectors_per_fat;
+	unsigned bytes_per_logical_sector_shift, bytes_per_logical_sector, logical_sectors_per_cluster_shift;
 	const struct BootSector::BPB *bpb = &bs->bpb;
 	const struct BootSector::FAT32Params *fat32 = nullptr;
 	if (bs->boot_sector_signature[0] != static_cast<std::byte>(0x55) ||
 		bs->boot_sector_signature[1] != static_cast<std::byte>(0xAA) ||
 		std::memcmp(bs->oem_name, "EXFAT   ", 8) == 0 ||
 		std::memcmp(bs->oem_name, "NTFS    ", 8) == 0 ||
-		!std::has_single_bit(letoh(bpb->bytes_per_logical_sector)) ||
-		!std::has_single_bit(bpb->logical_sectors_per_cluster) ||
+		(bytes_per_logical_sector = bpb->bytes_per_logical_sector) == 0 ||
+		bytes_per_logical_sector != 1u << (bytes_per_logical_sector_shift = std::bit_width(bytes_per_logical_sector) - 1) ||
+		bpb->logical_sectors_per_cluster == 0 ||
+		bpb->logical_sectors_per_cluster != 1u << (logical_sectors_per_cluster_shift = std::bit_width(bpb->logical_sectors_per_cluster) - 1) ||
 		bpb->reserved_logical_sectors == uint16_t(0) ||
 		bpb->fats == 0 ||
 		static_cast<uint8_t>(bpb->media_descriptor) < 0xF8 &&
@@ -255,9 +258,10 @@ int main(int argc, char *argv[]) {
 		std::clog << argv[1] << ": device does not contain a FAT file system" << std::endl;
 		return EX_DATAERR;
 	}
-	const uint32_t data_start_lsn = bpb->reserved_logical_sectors + bpb->fats * logical_sectors_per_fat + (bpb->root_dir_entries * 32 + bpb->bytes_per_logical_sector - 1) / bpb->bytes_per_logical_sector;
-	const uint32_t total_data_clusters = (total_logical_sectors - data_start_lsn) / bpb->logical_sectors_per_cluster;
-	const size_t cluster_size = bpb->logical_sectors_per_cluster * bpb->bytes_per_logical_sector;
+	const uint32_t data_start_lsn = bpb->reserved_logical_sectors + bpb->fats * logical_sectors_per_fat + (bpb->root_dir_entries * 32 + bytes_per_logical_sector - 1 >> bytes_per_logical_sector_shift);
+	const uint32_t total_data_clusters = total_logical_sectors - data_start_lsn >> logical_sectors_per_cluster_shift;
+	const unsigned cluster_shift = logical_sectors_per_cluster_shift + bytes_per_logical_sector_shift;
+	const size_t cluster_size = size_t(1) << cluster_shift;
 	unsigned active_fat = 0;
 	const struct BootSector::EBPB *ebpb;
 	if (fat32) {
@@ -288,28 +292,28 @@ int main(int argc, char *argv[]) {
 				"bs.oem_name = " << std::quoted(std::string_view { bs->oem_name, sizeof bs->oem_name }) << "\n"
 				"bpb.bytes_per_logical_sector = " << +bpb->bytes_per_logical_sector << "\n"
 				"bpb.logical_sectors_per_cluster = " << +bpb->logical_sectors_per_cluster <<
-					" (" << byte_count(bpb->logical_sectors_per_cluster * bpb->bytes_per_logical_sector) << ")\n"
+					" (" << byte_count(bpb->logical_sectors_per_cluster << bytes_per_logical_sector_shift) << ")\n"
 				"bpb.reserved_logical_sectors = " << +bpb->reserved_logical_sectors <<
-					" (" << byte_count(bpb->reserved_logical_sectors * bpb->bytes_per_logical_sector) << ")\n"
+					" (" << byte_count(bpb->reserved_logical_sectors << bytes_per_logical_sector_shift) << ")\n"
 				"bpb.fats = " << +bpb->fats << "\n"
 				"bpb.root_dir_entries = " << +bpb->root_dir_entries << "\n"
 				"bpb.old_total_logical_sectors = " << +bpb->old_total_logical_sectors <<
-					" (" << byte_count(bpb->old_total_logical_sectors * bpb->bytes_per_logical_sector) << ")\n"
+					" (" << byte_count(bpb->old_total_logical_sectors << bytes_per_logical_sector_shift) << ")\n"
 				"bpb.media_descriptor = " << bpb->media_descriptor << "\n"
 				"bpb.logical_sectors_per_fat = " << +bpb->logical_sectors_per_fat <<
-					" (" << byte_count(bpb->logical_sectors_per_fat * bpb->bytes_per_logical_sector) << ")\n"
+					" (" << byte_count(bpb->logical_sectors_per_fat << bytes_per_logical_sector_shift) << ")\n"
 				"bpb.physical_sectors_per_track = " << +bpb->physical_sectors_per_track << "\n"
 				"bpb.heads = " << +bpb->heads << '\n';
 		if (bpb->old_total_logical_sectors == uint16_t(0)) {
 			std::clog <<
 					"bpb.hidden_sectors = " << +bpb->hidden_sectors << "\n"
 					"bpb.total_logical_sectors = " << +bpb->total_logical_sectors <<
-						" (" << byte_count(uintmax_t { bpb->total_logical_sectors } * bpb->bytes_per_logical_sector) << ")\n";
+						" (" << byte_count(uintmax_t { bpb->total_logical_sectors } << bytes_per_logical_sector_shift) << ")\n";
 		}
 		if (fat32) {
 			std::clog <<
 					"fat32.logical_sectors_per_fat = " << +fat32->logical_sectors_per_fat <<
-						" (" << byte_count(uintmax_t { fat32->logical_sectors_per_fat } * bpb->bytes_per_logical_sector) << ")\n"
+						" (" << byte_count(uintmax_t { fat32->logical_sectors_per_fat } << bytes_per_logical_sector_shift) << ")\n"
 					"fat32.mirroring_flags = " << std::hex << +fat32->mirroring_flags << std::dec << "\n"
 					"fat32.version = " << fat_version(fat32->version) << "\n"
 					"fat32.root_dir_start_cluster = " << +fat32->root_dir_start_cluster << "\n"
@@ -334,7 +338,7 @@ int main(int argc, char *argv[]) {
 				"bs.boot_sector_signature = " << bs->boot_sector_signature << "\n"
 				"data_start_lsn = " << data_start_lsn << "\n"
 				"total_data_clusters = " << total_data_clusters <<
-					" (" << byte_count(uintmax_t { total_data_clusters } * cluster_size) << ')';
+					" (" << byte_count(uintmax_t { total_data_clusters } << cluster_shift) << ')';
 	}
 
 	uint32_t (*get_fat_entry)(const void *fat, uint32_t cluster) noexcept;
@@ -404,7 +408,7 @@ int main(int argc, char *argv[]) {
 	if (verbose_option) {
 		std::clog << " [FAT" << fat_entry_width << "]\n";
 	}
-	if (logical_sectors_per_fat < (min_fat_size + bpb->bytes_per_logical_sector - 1) / bpb->bytes_per_logical_sector) {
+	if (logical_sectors_per_fat < min_fat_size + bytes_per_logical_sector - 1 >> bytes_per_logical_sector_shift) {
 		std::clog << argv[1] << ": logical_sectors_per_fat=" << logical_sectors_per_fat << " is too small for total_data_clusters=" << total_data_clusters << std::endl;
 		return EX_DATAERR;
 	}
@@ -413,7 +417,7 @@ int main(int argc, char *argv[]) {
 	struct FSInfoSector *fs_info = nullptr;
 	if (fat32 && fat32->fs_info_lsn != uint16_t(0) && fat32->fs_info_lsn != uint16_t(0xFFFF)) {
 		fs_info = new(std::align_val_t(page_size)) struct FSInfoSector;
-		fd.pread_fully(fs_info, sizeof *fs_info, fat32->fs_info_lsn * bpb->bytes_per_logical_sector);
+		fd.pread_fully(fs_info, sizeof *fs_info, fat32->fs_info_lsn << bytes_per_logical_sector_shift);
 		if (std::memcmp(fs_info->fs_info_sector_signature1, "RRaA", 4) != 0 ||
 			std::memcmp(fs_info->fs_info_sector_signature2, "rrAa", 4) != 0 ||
 			std::memcmp(fs_info->fs_info_sector_signature3, "\0\0\x55\xAA", 4) != 0)
@@ -428,7 +432,7 @@ int main(int argc, char *argv[]) {
 			}
 			else {
 				std::clog << +fs_info->last_known_free_data_clusters <<
-						" (" << byte_count(uintmax_t { fs_info->last_known_free_data_clusters } * cluster_size) << ')';
+						" (" << byte_count(uintmax_t { fs_info->last_known_free_data_clusters } << cluster_shift) << ')';
 			}
 			std::clog << "\n"
 					"fs_info.most_recently_allocated_data_cluster = " << (fs_info->most_recently_allocated_data_cluster == 0xFFFFFFFF ? std::hex : std::dec) << +fs_info->most_recently_allocated_data_cluster << std::dec << '\n';
@@ -436,9 +440,9 @@ int main(int argc, char *argv[]) {
 	}
 	std::clog.flush();
 
-	const size_t fat_size = logical_sectors_per_fat * bpb->bytes_per_logical_sector;
+	const size_t fat_size = logical_sectors_per_fat << bytes_per_logical_sector_shift;
 	auto const fat = new(std::align_val_t(page_size)) std::byte[fat_size];
-	fd.pread_fully(fat, fat_size, bpb->reserved_logical_sectors * bpb->bytes_per_logical_sector + active_fat * fat_size);
+	fd.pread_fully(fat, fat_size, (bpb->reserved_logical_sectors << bytes_per_logical_sector_shift) + active_fat * fat_size);
 	if (auto entry = get_fat_entry(fat, 0); entry != expected_fat_id) {
 		std::clog << argv[1] << ": FAT ID is " << std::hex << entry << " but should be " << expected_fat_id << std::dec << '\n';
 	}
@@ -459,11 +463,11 @@ int main(int argc, char *argv[]) {
 	if (verbose_option) {
 		std::clog << "FAT contains:\n" <<
 				std::setw(10) << used_clusters << " used cluster" << (used_clusters == 1 ? ' ' : 's') <<
-					" (" << std::setw(8) << byte_count(uintmax_t { used_clusters } * cluster_size) << ")\n" <<
+					" (" << std::setw(8) << byte_count(uintmax_t { used_clusters } << cluster_shift) << ")\n" <<
 				std::setw(10) << free_clusters << " free cluster" << (free_clusters == 1 ? ' ' : 's') <<
-					" (" << std::setw(8) << byte_count(uintmax_t { free_clusters } * cluster_size) << ")\n" <<
+					" (" << std::setw(8) << byte_count(uintmax_t { free_clusters } << cluster_shift) << ")\n" <<
 				std::setw(10) << bad_clusters << "  bad cluster" << (bad_clusters == 1 ? ' ' : 's') <<
-					" (" << std::setw(8) << byte_count(uintmax_t { bad_clusters } * cluster_size) << ")\n";
+					" (" << std::setw(8) << byte_count(uintmax_t { bad_clusters } << cluster_shift) << ")\n";
 	}
 	if (fs_info && fs_info->last_known_free_data_clusters != free_clusters && fs_info->last_known_free_data_clusters != 0xFFFFFFFF) {
 		std::clog << argv[1] << ": FS Information Sector free cluster count is incorrect\n";
@@ -493,7 +497,7 @@ int main(int argc, char *argv[]) {
 			uint32_t total = free_clusters + bad_clusters;
 			std::clog.put('\r') << static_cast<unsigned>((uint64_t { progress } * 100 + total / 2) / total) << '%' << std::flush;
 		}
-		const off_t offset = (data_start_lsn + off_t { cluster - 2 } * bpb->logical_sectors_per_cluster) * bpb->bytes_per_logical_sector;
+		const off_t offset = data_start_lsn + (off_t { cluster - 2 } << logical_sectors_per_cluster_shift) << bytes_per_logical_sector_shift;
 		bool buf1_valid = false;
 		auto new_entry = entry;
 		for (Action action : *actions) {
@@ -609,33 +613,33 @@ error:
 	if (marked_bad || marked_free) {
 		std::clog << "writing modified FAT" << (bpb->fats == 1 ? "" : "s") << "... " << std::flush;
 		for (unsigned fat_idx = 0; fat_idx < bpb->fats; ++fat_idx) {
-			fd.pwrite_fully(fat, fat_size, bpb->reserved_logical_sectors * bpb->bytes_per_logical_sector + fat_idx * fat_size);
+			fd.pwrite_fully(fat, fat_size, (bpb->reserved_logical_sectors << bytes_per_logical_sector_shift) + fat_idx * fat_size);
 		}
 		if (fs_info && marked_bad != marked_free) {
 			fs_info->last_known_free_data_clusters = free_clusters - marked_bad + marked_free;
-			fd.pwrite_fully(fs_info, sizeof *fs_info, fat32->fs_info_lsn * bpb->bytes_per_logical_sector);
+			fd.pwrite_fully(fs_info, sizeof *fs_info, fat32->fs_info_lsn << bytes_per_logical_sector_shift);
 		}
 		std::clog << "done." << std::endl;
 	}
 	if (marked_bad || verbose_option) {
 		std::clog << marked_bad << " cluster" << (marked_bad == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { marked_bad } * cluster_size) << ") marked bad\n";
+				" (" << byte_count(uintmax_t { marked_bad } << cluster_shift) << ") marked bad\n";
 	}
 	if (marked_free || verbose_option) {
 		std::clog << marked_free << " cluster" << (marked_free == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { marked_free } * cluster_size) << ") marked free\n";
+				" (" << byte_count(uintmax_t { marked_free } << cluster_shift) << ") marked free\n";
 	}
 	if (zeroed_out || verbose_option) {
 		std::clog << zeroed_out << " cluster" << (zeroed_out == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { zeroed_out } * cluster_size) << ") zeroed out\n";
+				" (" << byte_count(uintmax_t { zeroed_out } << cluster_shift) << ") zeroed out\n";
 	}
 	if (discarded || verbose_option) {
 		std::clog << discarded << " cluster" << (discarded == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { discarded } * cluster_size) << ") discarded\n";
+				" (" << byte_count(uintmax_t { discarded } << cluster_shift) << ") discarded\n";
 	}
 	if (trashed || verbose_option) {
 		std::clog << trashed << " cluster" << (trashed == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { trashed } * cluster_size) << ") trashed\n";
+				" (" << byte_count(uintmax_t { trashed } << cluster_shift) << ") trashed\n";
 	}
 	std::clog.flush();
 	return !!marked_bad;
