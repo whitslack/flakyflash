@@ -95,6 +95,19 @@ static std::ostream & operator<<(std::ostream &os, const std::byte (&b)[N]) {
 	return os;
 }
 
+struct fat_version {
+	const uint16_t version;
+	constexpr explicit fat_version(uint16_t version) noexcept : version(version) { }
+	friend std::ostream & operator<<(std::ostream &os, const struct fat_version &v) {
+		auto fill = os.fill('0');
+		auto flags = os.flags(std::ios_base::dec | std::ios_base::right);
+		os << (v.version >> 8) << '.' << std::setw(2) << (v.version & 0xFF);
+		os.flags(flags);
+		os.fill(fill);
+		return os;
+	}
+};
+
 static void getrandom_fully(void *buf, size_t buflen, unsigned flags = 0) {
 	for (ssize_t r; (r = ::getrandom(buf, buflen, flags)) >= 0;) {
 		if ((buflen -= r) == 0) {
@@ -221,7 +234,7 @@ int main(int argc, char *argv[]) {
 		return EX_DATAERR;
 	}
 	if (fat32 && fat32->version != uint16_t(0)) {
-		std::clog << argv[1] << ": device contains unsupported FAT32 version " << (fat32->version >> 8) << '.' << (fat32->version & 0xFF) << std::endl;
+		std::clog << argv[1] << ": device contains unsupported FAT32 version " << fat_version(fat32->version) << std::endl;
 		return EX_DATAERR;
 	}
 	unsigned active_fat = 0;
@@ -264,7 +277,7 @@ int main(int argc, char *argv[]) {
 					"fat32.logical_sectors_per_fat = " << +fat32->logical_sectors_per_fat <<
 						" (" << byte_count(uintmax_t { fat32->logical_sectors_per_fat } * bs->bytes_per_logical_sector) << ")\n"
 					"fat32.mirroring_flags = " << std::hex << +fat32->mirroring_flags << std::dec << "\n"
-					"fat32.version = " << (fat32->version >> 8) << '.' << (fat32->version & 0xFF) << "\n"
+					"fat32.version = " << fat_version(fat32->version) << "\n"
 					"fat32.root_dir_start_cluster = " << +fat32->root_dir_start_cluster << "\n"
 					"fat32.fs_info_lsn = " << +fat32->fs_info_lsn << "\n"
 					"fat32.boot_sector_backup_lsn = " << +fat32->boot_sector_backup_lsn << "\n"
