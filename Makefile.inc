@@ -2,7 +2,7 @@ SOURCES += $(wildcard *.cpp) $(wildcard common/*.cpp)
 CPPFLAGS += -D_FILE_OFFSET_BITS=64
 
 
-FLAKYFLASH_OBJECTS := $(addprefix $(OBJDIR)/,flakyflash.o $(addprefix common/,cli.o fd.o format.o))
+FLAKYFLASH_OBJECTS := $(addprefix $(OBJDIR)/,flakyflash.o exfat.o $(addprefix common/,cli.o fd.o format.o io.o uuid.o))
 FLAKYFLASH := $(BINDIR)/flakyflash$(EXEC_SUFFIX)
 ALL += $(FLAKYFLASH)
 

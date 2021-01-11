@@ -1,13 +1,15 @@
 [F3]: https://github.com/AltraMayor/f3 "F3 - Fight Flash Fraud"
 
-[fatgen103.doc]: http://download.microsoft.com/download/1/6/1/161ba512-40e2-4cc9-843a-923143f3456c/fatgen103.doc
+[FAT]: http://download.microsoft.com/download/1/6/1/161ba512-40e2-4cc9-843a-923143f3456c/fatgen103.doc
+
+[exFAT]: https://docs.microsoft.com/en-us/windows/win32/fileio/exfat-specification
 
 
 # Flakyflash
 
-Flakyflash is a Linux-based tool for diagnosing and salvaging FAT-formatted flash media having flaky sectors that do not retain data correctly. Note, it is not intended for diagnosing "fake flash" (a.k.a. "fraudulent flash") media; see [F3][] for that.
+Flakyflash is a Linux-based tool for diagnosing and salvaging [FAT][]- and [exFAT][]-formatted flash media having flaky sectors that do not retain data correctly. Note, it is not intended for diagnosing "fake flash" (a.k.a. "fraudulent flash") media; see [F3][] for that.
 
-Flakyflash works by reading each free data cluster in a FAT file system and then *re-reading* it and comparing the two reads. If they differ, then the cluster is assumed to be "flaky," and Flakyflash marks the cluster as bad in the file allocation table so that file system drivers will not allocate data to it. Only free data clusters (and, as an option, already marked-bad data clusters) are checked. Clusters that are currently in use by files and subdirectory metadata are not touched in any way. Obviously, for the most thorough checking, one should run this tool on a completely empty file system so that every data cluster may be checked for flakiness.
+Flakyflash works by reading each free data cluster in a FAT or exFAT file system and then *re-reading* it and comparing the two reads. If they differ, then the cluster is assumed to be "flaky," and Flakyflash marks the cluster as bad in the file allocation table so that file system drivers will not allocate data to it. Only free data clusters (and, as an option, already marked-bad data clusters) are checked. Clusters that are currently in use by files and subdirectory metadata are not touched in any way. Obviously, for the most thorough checking, one should run this tool on a completely empty file system so that every data cluster may be checked for flakiness.
 
 ## Usage
 
@@ -39,7 +41,7 @@ defaults:
 	--free-clusters=read,reread
 ```
 
-If run with the `--verbose` option, Flakyflash outputs a human-readable decoding of all [standard FAT file system][fatgen103.doc] superblock fields, including FAT32-specific fields (if applicable) and the fields of the File System Information sector (if present).
+If run with the `--verbose` option, Flakyflash outputs a human-readable decoding of all standard [FAT][] or [exFAT][] file system superblock fields, including FAT32-specific fields (if applicable) and the fields of the File System Information sector (if present).
 
 For each free cluster (and, optionally, for each bad cluster), Flakyflash performs a user-specified sequence of actions, which may comprise:
 
@@ -110,7 +112,7 @@ Retests all data clusters previously marked as bad. Each bad cluster is first ma
 
 ## Building
 
-You'll need GCC 9 or newer to build Flakyflash.
+You'll need GCC 10 or newer to build Flakyflash.
 
 	git clone --recurse-submodules https://github.com/whitslack/flakyflash.git
 	cd flakyflash
