@@ -598,7 +598,7 @@ error:
 			new_entry = bad_cluster;
 		}
 		else {
-			std::clog << (new_entry ? "marking bad" : "marking free");
+			std::clog << "\rmarking " << (new_entry ? "bad" : "free");
 		}
 		std::clog << " cluster #" << cluster << " at offset " << std::hex << offset << std::dec << std::endl;
 		if (new_entry != entry) {
