@@ -10,7 +10,9 @@
 
 #include <sysexits.h>
 #include <linux/fs.h>
+#include <linux/hdreg.h>
 #include <sys/random.h>
+#include <sys/sysinfo.h>
 
 #include "common/cli.h"
 #include "common/compiler.h"
@@ -386,7 +388,7 @@ int main(int argc, char *argv[]) {
 	}
 	uint32_t data_start_lsn, total_data_clusters;
 	const unsigned cluster_shift = logical_sectors_per_cluster_shift + bytes_per_logical_sector_shift;
-	const size_t cluster_size = size_t(1) << cluster_shift;
+	const uint32_t cluster_size = UINT32_C(1) << cluster_shift;
 	unsigned active_fat = 0;
 	const struct BootSector::EBPB *ebpb = nullptr;
 	if (exfat) {
@@ -753,12 +755,36 @@ int main(int argc, char *argv[]) {
 		return EX_OK;
 	}
 
+	unsigned buf_size_shift = 26u; // 64 MiB
+	{
+		struct sysinfo info { };
+		if (sysinfo(&info) == 0) {
+			buf_size_shift = std::min(std::max(static_cast<unsigned>(std::bit_width(info.freeram - 1)) - 1, 23u /* 8 MiB */), buf_size_shift);
+		}
+	}
+	uint32_t alignment_offset_clusters = 0;
+	try {
+		struct hd_geometry geo { };
+		fd.ioctl(HDIO_GETGEO, &geo);
+		uint32_t data_start_abs_offset = static_cast<uint32_t>((geo.start << 9) + (data_start_lsn << bytes_per_logical_sector_shift));
+		if ((data_start_abs_offset & (UINT32_C(1) << cluster_shift) - 1) == 0) {
+			alignment_offset_clusters = (-data_start_abs_offset & (UINT32_C(1) << buf_size_shift) - 1) >> cluster_shift;
+		}
+	}
+	catch (const std::system_error &) {
+		// swallow; don't align cluster I/O
+	}
+
 	uint32_t marked_bad = 0, marked_free = 0, zeroed_out = 0, discarded = 0, trashed = 0, misplaced = 0;
-	auto const buf1 = new(std::align_val_t(page_size)) std::byte[cluster_size];
-	auto const buf2 = new(std::align_val_t(page_size)) std::byte[cluster_size];
-	for (uint32_t cluster = 2, progress = 0; cluster <= max_cluster; ++cluster) {
+	auto const buf1 = new(std::align_val_t(page_size)) std::byte[size_t(1) << buf_size_shift];
+	auto const buf2 = new(std::align_val_t(page_size)) std::byte[size_t(1) << buf_size_shift];
+	for (uint32_t from_cluster = 2, to_cluster, error_end = 0, progress = 0;
+		from_cluster <= max_cluster;
+		from_cluster = to_cluster)
+	{
+		to_cluster = from_cluster + 1;
 		const Actions *actions;
-		auto const entry = get_fat_entry(fat, cluster);
+		auto const entry = get_fat_entry(fat, from_cluster);
 		if (entry == 0) {
 			actions = &free_clusters_option.value();
 		}
@@ -768,164 +794,218 @@ int main(int argc, char *argv[]) {
 		else {
 			continue;
 		}
-		if (++progress % 1024 == 0) {
-			uint32_t total = free_clusters + bad_clusters;
-			std::clog.put('\r') << static_cast<unsigned>((uint64_t { progress } * 100 + total / 2) / total) << '%' << std::flush;
+		if (actions->empty()) {
+			continue;
 		}
-		const off_t offset = data_start_lsn + (off_t { cluster - 2 } << logical_sectors_per_cluster_shift) << bytes_per_logical_sector_shift;
+		auto actions_itr = actions->begin();
+restart_action:
+		if (from_cluster >= error_end) {
+			for (uint32_t max_to_cluster = static_cast<uint32_t>(std::min<uint64_t>(from_cluster + (UINT64_C(1) << buf_size_shift - cluster_shift), max_cluster + 1));
+				to_cluster <= max_cluster && get_fat_entry(fat, to_cluster) == entry;)
+			{
+				if (++to_cluster > max_to_cluster) {
+					to_cluster = (from_cluster + alignment_offset_clusters + (UINT32_C(1) << buf_size_shift - cluster_shift) & ~((UINT32_C(1) << buf_size_shift - cluster_shift) - 1)) - alignment_offset_clusters;
+					break;
+				}
+			}
+		}
+		const uint32_t clusters = to_cluster - from_cluster;
+		const size_t chunk_size = size_t { clusters } << cluster_shift;
+		const off_t offset = data_start_lsn + (off_t { from_cluster - 2 } << logical_sectors_per_cluster_shift) << bytes_per_logical_sector_shift;
+		auto const mark = [fat, entry, &put_fat_entry, &marked_bad, &marked_free, fs_info](const char message[], uint32_t cluster, off_t offset, uint32_t new_entry) {
+			if (message) {
+				std::clog << message << " cluster #" << cluster << " at offset " << std::hex << offset << std::dec << std::endl;
+			}
+			if (new_entry != entry) {
+				put_fat_entry(fat, cluster, new_entry);
+				++(new_entry ? marked_bad : marked_free);
+				if (fs_info) {
+					fs_info->most_recently_allocated_data_cluster = cluster;
+				}
+			}
+		};
 		bool buf1_valid = false;
-		auto new_entry = entry;
-		for (Action action : *actions) {
-			switch (action) {
+		for (; actions_itr != actions->end(); ++actions_itr) {
+			switch (Action action = *actions_itr) {
 				case Action::READ:
 					try {
-						fd.pread_fully(buf1, cluster_size, offset);
+						fd.pread_fully(buf1, chunk_size, offset);
 						buf1_valid = true;
 					}
 					catch (const std::system_error &e) {
 						if (e.code().value() != EIO) {
 							throw;
 						}
-						std::clog << "\rerror while reading";
-						goto error;
+						if (clusters > 1) {
+							error_end = to_cluster, to_cluster = from_cluster + 1;
+							goto restart_action;
+						}
+						mark("\rerror while reading", from_cluster, offset, bad_cluster);
+						goto next_chunk;
 					}
 					break;
 				case Action::READZEROS:
-					std::memset(buf1, 0, cluster_size);
+					std::memset(buf1, 0, chunk_size);
 					buf1_valid = true;
 					[[fallthrough]];
 				case Action::REREAD:
 					try {
 						if (!buf1_valid) {
-							fd.pread_fully(buf1, cluster_size, offset);
+							fd.pread_fully(buf1, chunk_size, offset);
 							buf1_valid = true;
 						}
-						fd.pread_fully(buf2, cluster_size, offset);
+						fd.pread_fully(buf2, chunk_size, offset);
 					}
 					catch (const std::system_error &e) {
 						if (e.code().value() != EIO) {
 							throw;
 						}
-						std::clog << "\rerror while reading";
-						goto error;
+						if (clusters > 1) {
+							error_end = to_cluster, to_cluster = from_cluster + 1;
+							goto restart_action;
+						}
+						mark("\rerror while reading", from_cluster, offset, bad_cluster);
+						goto next_chunk;
 					}
-					if (std::memcmp(buf1, buf2, cluster_size) != 0) {
-						std::clog << "\rflaky";
-						goto error;
+					for (uint32_t cluster = from_cluster, o = 0; cluster < to_cluster; ++cluster, o += cluster_size) {
+						if (get_fat_entry(fat, cluster) != 1 && std::memcmp(buf1 + o, buf2 + o, cluster_size) != 0) {
+							mark("\rflaky", cluster, offset + o, 1);
+						}
 					}
 					break;
 				case Action::ZEROOUT:
-					if (!buf1_valid || std::any_of(buf1, buf1 + cluster_size, std::identity { })) {
+					if (!buf1_valid || std::any_of(buf1, buf1 + chunk_size, std::identity { })) {
 						try {
-							uint64_t span[2] = { static_cast<uint64_t>(offset), cluster_size };
+							uint64_t span[2] = { static_cast<uint64_t>(offset), chunk_size };
 							fd.ioctl(BLKZEROOUT, span);
-							++zeroed_out;
-							std::memset(buf1, 0, cluster_size);
+							zeroed_out += clusters;
+							std::memset(buf1, 0, chunk_size);
 							buf1_valid = true;
 						}
 						catch (const std::system_error &e) {
 							if (e.code().value() != EIO) {
 								throw;
 							}
-							std::clog << "\rerror while zeroing";
-							goto error;
+							if (clusters > 1) {
+								error_end = to_cluster, to_cluster = from_cluster + 1;
+								goto restart_action;
+							}
+							mark("\rerror while zeroing", from_cluster, offset, bad_cluster);
+							goto next_chunk;
 						}
 					}
 					break;
-				case Action::F3WRITE:
-					if (f3_fill(buf1, cluster_size, offset) || !buf1_valid) {
+				case Action::F3WRITE: {
+					bool need_write = !buf1_valid;
+					for (uint32_t o = 0; o < chunk_size; o += cluster_size) {
+						need_write |= f3_fill(buf1 + o, cluster_size, offset + o);
+					}
+					if (need_write) {
 						goto write_trash;
 					}
 					break;
+				}
 				case Action::F3READ:
 					try {
-						fd.pread_fully(buf1, cluster_size, offset);
+						fd.pread_fully(buf1, chunk_size, offset);
 						buf1_valid = true;
 					}
 					catch (const std::system_error &e) {
 						if (e.code().value() != EIO) {
 							throw;
 						}
-						std::clog << "\rerror while reading";
-						goto error;
-					}
-					f3_fill(buf2, cluster_size, offset);
-					if (std::memcmp(buf1, buf2, cluster_size) != 0) {
-						if (count_flipped_bits(buf1, buf2, cluster_size) > cluster_size) {
-							if (off_t found_offset = static_cast<off_t>(*reinterpret_cast<le<uint64_t> *>(buf1));
-							    found_offset != offset && !f3_fill(buf1, cluster_size, found_offset))
-							{
-								std::clog << "\rdata intended for offset " << std::hex << found_offset << std::dec << " were found in";
-								++misplaced;
-								goto warning;
-							}
-							std::clog << "\rcorrupted";
-							goto warning;
+						if (clusters > 1) {
+							error_end = to_cluster, to_cluster = from_cluster + 1;
+							goto restart_action;
 						}
-						std::clog << "\rflaky";
-						goto error;
+						mark("\rerror while reading", from_cluster, offset, bad_cluster);
+						goto next_chunk;
+					}
+					for (uint32_t cluster = from_cluster, o = 0; cluster < to_cluster; ++cluster, o += cluster_size) {
+						if (get_fat_entry(fat, cluster) != 1 && (f3_fill(buf2 + o, cluster_size, offset + o), std::memcmp(buf1 + o, buf2 + o, cluster_size) != 0)) {
+							if (count_flipped_bits(buf1 + o, buf2 + o, cluster_size) > cluster_size) {
+								if (off_t found_offset = static_cast<off_t>(*reinterpret_cast<le<uint64_t> *>(buf1 + o));
+									found_offset != offset && (f3_fill(buf2 + o, cluster_size, found_offset), std::memcmp(buf1 + o, buf2 + o, cluster_size) == 0))
+								{
+									++misplaced;
+									std::clog << "\rdata intended for offset " << std::hex << found_offset << std::dec << " were found in";
+								}
+								else {
+									std::clog << "\rcorrupted";
+								}
+								std::clog << " cluster #" << cluster << " at offset " << std::hex << offset + o << std::dec << std::endl;
+							}
+							else {
+								mark("\rflaky", cluster, offset + o, 1);
+							}
+						}
 					}
 					break;
 				case Action::SECDISCARD:
 				case Action::DISCARD:
 					try {
-						uint64_t span[2] = { static_cast<uint64_t>(offset), cluster_size };
+						uint64_t span[2] = { static_cast<uint64_t>(offset), chunk_size };
 						fd.ioctl(action == Action::SECDISCARD ? BLKSECDISCARD : BLKDISCARD, span);
-						++discarded;
+						discarded += clusters;
 						buf1_valid = false;
 					}
 					catch (const std::system_error &e) {
 						if (e.code().value() != EIO) {
 							throw;
 						}
-						std::clog << "\rerror while discarding";
-						goto error;
+						if (clusters > 1) {
+							error_end = to_cluster, to_cluster = from_cluster + 1;
+							goto restart_action;
+						}
+						mark("\rerror while discarding", from_cluster, offset, bad_cluster);
+						goto next_chunk;
 					}
 					break;
 				case Action::TRASH:
-					getrandom_fully(buf1, cluster_size);
+					getrandom_fully(buf1, chunk_size);
 write_trash:
 					try {
-						fd.pwrite_fully(buf1, cluster_size, offset);
-						++trashed;
+						fd.pwrite_fully(buf1, chunk_size, offset);
+						trashed += clusters;
 						buf1_valid = true;
 					}
 					catch (const std::system_error &e) {
 						if (e.code().value() != EIO) {
 							throw;
 						}
-						std::clog << "\rerror while writing";
-						goto error;
+						if (clusters > 1) {
+							error_end = to_cluster, to_cluster = from_cluster + 1;
+							goto restart_action;
+						}
+						mark("\rerror while writing", from_cluster, offset, bad_cluster);
+						goto next_chunk;
 					}
 					break;
 				case Action::BAD:
-					new_entry = bad_cluster;
-					break;
+					for (uint32_t cluster = from_cluster, o = 0; cluster < to_cluster; ++cluster, o += cluster_size) {
+						mark(nullptr, cluster, offset + o, bad_cluster);
+					}
+					goto next_chunk;
 				case Action::FREE:
-					new_entry = 0;
+					for (uint32_t cluster = from_cluster, o = 0; cluster < to_cluster; ++cluster, o += cluster_size) {
+						mark(nullptr, cluster, offset + o, 0);
+					}
 					break;
 			}
 		}
-		if (new_entry == entry) {
-			continue;
-error:
-			new_entry = bad_cluster;
-		}
-		else {
-			std::clog << "\rmarking " << (new_entry ? "bad" : "free");
-		}
-warning:
-		std::clog << " cluster #" << cluster << " at offset " << std::hex << offset << std::dec << std::endl;
-		if (new_entry != entry) {
-			put_fat_entry(fat, cluster, new_entry);
-			++(new_entry ? marked_bad : marked_free);
-			if (fs_info) {
-				fs_info->most_recently_allocated_data_cluster = cluster;
-			}
+next_chunk:
+		if (auto old_progress = progress; (progress += to_cluster - from_cluster) / 1024 != old_progress / 1024) {
+			uint32_t total = free_clusters + bad_clusters;
+			std::clog.put('\r') << static_cast<unsigned>((uint64_t { progress } * 100 + total / 2) / total) << '%' << std::flush;
 		}
 	}
 	std::clog << "\r\033[K";
 	if (marked_bad || marked_free) {
+		for (uint32_t cluster = 2; cluster <= max_cluster; ++cluster) {
+			if (get_fat_entry(fat, cluster) == 1) {
+				put_fat_entry(fat, cluster, bad_cluster);
+			}
+		}
 		std::clog << "writing modified FAT";
 		if (exfat) {
 			std::clog << " and allocation bitmap... " << std::flush;
