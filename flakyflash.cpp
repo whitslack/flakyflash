@@ -925,7 +925,7 @@ restart_action:
 						if (get_fat_entry(fat, cluster) != 1 && (f3_fill(buf2 + o, cluster_size, offset + o), std::memcmp(buf1 + o, buf2 + o, cluster_size) != 0)) {
 							if (count_flipped_bits(buf1 + o, buf2 + o, cluster_size) > cluster_size) {
 								if (off_t found_offset = static_cast<off_t>(*reinterpret_cast<le<uint64_t> *>(buf1 + o));
-									found_offset != offset && (f3_fill(buf2 + o, cluster_size, found_offset), std::memcmp(buf1 + o, buf2 + o, cluster_size) == 0))
+									found_offset != offset + o && (f3_fill(buf2 + o, cluster_size, found_offset), std::memcmp(buf1 + o, buf2 + o, cluster_size) == 0))
 								{
 									++misplaced;
 									std::clog << "\rdata intended for offset " << std::hex << found_offset << std::dec << " were found in";
