@@ -812,15 +812,14 @@ restart_action:
 		const uint32_t clusters = to_cluster - from_cluster;
 		const size_t chunk_size = size_t { clusters } << cluster_shift;
 		const off_t offset = data_start_lsn + (off_t { from_cluster - 2 } << logical_sectors_per_cluster_shift) << bytes_per_logical_sector_shift;
-		auto const mark = [fat, entry, &put_fat_entry, &marked_bad, &marked_free, fs_info](const char message[], uint32_t cluster, off_t offset, uint32_t new_entry) {
+		auto const mark = [fat, &get_fat_entry, &put_fat_entry, &marked_bad, &marked_free, fs_info](const char message[], uint32_t cluster, off_t offset, uint32_t new_entry) {
 			if (message) {
 				std::clog << message << " cluster #" << cluster << " at offset " << std::hex << offset << std::dec << std::endl;
 			}
-			if (new_entry != entry) {
+			if (auto old_entry = get_fat_entry(fat, cluster); new_entry != old_entry) {
 				put_fat_entry(fat, cluster, new_entry);
-				++(new_entry ? marked_bad : marked_free);
-				if (fs_info) {
-					fs_info->most_recently_allocated_data_cluster = cluster;
+				if (!new_entry != !old_entry) {
+					++(new_entry ? marked_bad : marked_free);
 				}
 			}
 		};
