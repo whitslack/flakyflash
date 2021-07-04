@@ -234,7 +234,7 @@ static DynamicBuffer make_aligned_buffer(size_t alignment, size_t size) {
 }
 
 enum class Action {
-	READ, REREAD, ZEROOUT, READZEROS, F3WRITE, F3READ, SECDISCARD, DISCARD, TRASH, BAD, FREE
+	READ, REREAD, ZEROOUT, READZEROS, F3WRITE, F3READ, SECDISCARD, DISCARD, TRASH, BAD, FREE, LIST
 };
 
 static Action _pure parse_action(std::string_view sv) {
@@ -270,6 +270,9 @@ static Action _pure parse_action(std::string_view sv) {
 	}
 	if (sv == "free") {
 		return Action::FREE;
+	}
+	if (sv == "list") {
+		return Action::LIST;
 	}
 	throw std::invalid_argument(std::string { sv });
 }
@@ -327,6 +330,7 @@ int main(int argc, char *argv[]) {
 				"\ttrash: fill cluster with pseudorandom garbage\n"
 				"\tbad: mark cluster as bad unconditionally\n"
 				"\tfree: mark cluster as free unconditionally\n"
+				"\tlist: write cluster number to stdout\n"
 				"\n"
 				"defaults:\n"
 				"\t--bad-clusters=\n"
@@ -990,6 +994,11 @@ write_trash:
 						mark(nullptr, cluster, offset + o, 0);
 					}
 					break;
+				case Action::LIST:
+					for (uint32_t cluster = from_cluster; cluster < to_cluster; ++cluster) {
+						std::cout << cluster << '\n';
+					}
+					break;
 			}
 		}
 next_chunk:
@@ -998,6 +1007,7 @@ next_chunk:
 			std::clog.put('\r') << static_cast<unsigned>((uint64_t { progress } * 100 + total / 2) / total) << '%' << std::flush;
 		}
 	}
+	std::cout << std::flush;
 	std::clog << "\r\033[K";
 	if (marked_bad || marked_free) {
 		for (uint32_t cluster = 2; cluster <= max_cluster; ++cluster) {

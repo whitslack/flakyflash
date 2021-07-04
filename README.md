@@ -35,6 +35,7 @@ actions:
 	trash: fill cluster with pseudorandom garbage
 	bad: mark cluster as bad unconditionally
 	free: mark cluster as free unconditionally
+	list: write cluster number to stdout
 
 defaults:
 	--bad-clusters=
@@ -66,6 +67,8 @@ For each free cluster (and, optionally, for each bad cluster), Flakyflash perfor
 * **`bad`** – Unconditionally marks the cluster as bad and continues immediately to the next cluster. There may be no good use for this action, but it is included for completeness.
 
 * **`free`** – Unconditionally marks the cluster as free. This action may be used to effect retesting of clusters previously marked as bad by specifying it as an action to perform on bad clusters.
+
+* **`list`** – Writes the cluster number to the standard output stream, followed by a newline character. Note that for historical reasons the first data cluster is numbered 2.
 
 To reduce I/O overhead (and potentially also to reduce wear on cheap flash media), Flakyflash logically merges contiguous runs of clusters having the same disposition (free or bad) into chunks and performs the user-specified actions upon a whole chunk at a time. Where possible, Flakyflash attempts to align these chunks to device offsets that are multiples of 8 MiB, taking into account any partition offset. If any action that was attempted upon a multiple-cluster chunk encounters a hardware error (i.e., a system call returns error code `EIO`), then Flakyflash reattempts the action (and all remaining actions in the specified sequence) on each cluster in the chunk individually so as to determine exactly which clusters are problematic. If any action that was attempted upon a single cluster encounters a hardware error, then Flakyflash marks the cluster as bad and continues immediately to the next cluster.
 
