@@ -294,6 +294,48 @@ struct Actions : std::vector<Action> {
 		}
 		return *this;
 	}
+	void drop_destructive_actions(const char option[]) {
+		std::erase_if(*this, [option](Action action) {
+			switch (action) {
+				case Action::READ:
+				case Action::REREAD:
+					return false;
+				case Action::ZEROOUT:
+					log_dropped_action(option, "zeroout");
+					return true;
+				case Action::READZEROS:
+					return false;
+				case Action::F3WRITE:
+					log_dropped_action(option, "f3write");
+					return true;
+				case Action::F3READ:
+					return false;
+				case Action::SECDISCARD:
+					log_dropped_action(option, "secdiscard");
+					return true;
+				case Action::DISCARD:
+					log_dropped_action(option, "discard");
+					return true;
+				case Action::TRASH:
+					log_dropped_action(option, "trash");
+					return true;
+				case Action::BAD:
+					log_dropped_action(option, "bad");
+					return true;
+				case Action::FREE:
+					log_dropped_action(option, "free");
+					return true;
+				case Action::LIST:
+					return false;
+			}
+			return false;
+		});
+		std::clog.flush();
+	}
+private:
+	static void log_dropped_action(const char option[], const char action[]) {
+		std::clog << "--" << option << ": " << action << " action ignored due to --dry-run\n";
+	}
 };
 
 int main(int argc, char *argv[]) {
@@ -304,16 +346,25 @@ int main(int argc, char *argv[]) {
 			bad_clusters_option { "bad-clusters", 'b' },
 			free_clusters_option { "free-clusters", 'f' };
 	cli::Option<>
+			dry_run_option { "dry-run", 'n' },
 			verbose_option { "verbose", 'v' },
 			help_option { "help" };
 	bad_clusters_option.args.emplace_back();
 	free_clusters_option.args.emplace_back(Actions { Action::READ, Action::REREAD });
-	if ((argc = cli::parse(argc, argv, { &bad_clusters_option, &free_clusters_option, &verbose_option, &help_option })) < 2 || help_option) {
+	if ((argc = cli::parse(argc, argv, {
+			&bad_clusters_option,
+			&free_clusters_option,
+			&dry_run_option,
+			&verbose_option,
+			&help_option
+		})) != 2 || help_option)
+	{
 		std::clog << "usage: " << argv[0] << " [options] <block-device>\n"
 				"\n"
 				"options:\n"
 				"\t-b,--bad-clusters=[<action>,...]\n"
 				"\t-f,--free-clusters=[<action>,...]\n"
+				"\t-n,--dry-run\n"
 				"\t-v,--verbose\n"
 				"\n"
 				"actions:\n"
@@ -337,12 +388,17 @@ int main(int argc, char *argv[]) {
 				"\t--free-clusters=read,reread\n";
 		return EX_USAGE;
 	}
+	if (dry_run_option) {
+		bad_clusters_option.args.back().drop_destructive_actions(bad_clusters_option.long_form);
+		free_clusters_option.args.back().drop_destructive_actions(free_clusters_option.long_form);
+	}
+
 	auto const page_size = sysconf(_SC_PAGE_SIZE);
 	if (page_size < 0) {
 		throw std::system_error(errno, std::system_category(), "sysconf(_SC_PAGE_SIZE)");
 	}
 
-	FileDescriptor fd(argv[1], O_RDWR | O_EXCL | O_DIRECT | O_CLOEXEC);
+	FileDescriptor fd(argv[1], (dry_run_option ? O_RDONLY : O_RDWR) | O_EXCL | O_DIRECT | O_CLOEXEC);
 
 	auto const bs = new(std::align_val_t(page_size)) struct BootSector;
 	fd.pread_fully(bs, sizeof *bs, 0);
@@ -1009,7 +1065,7 @@ next_chunk:
 	}
 	std::cout << std::flush;
 	std::clog << "\r\033[K";
-	if (marked_bad || marked_free) {
+	if ((marked_bad || marked_free) && !dry_run_option) {
 		for (uint32_t cluster = 2; cluster <= max_cluster; ++cluster) {
 			if (get_fat_entry(fat, cluster) == 1) {
 				put_fat_entry(fat, cluster, bad_cluster);
@@ -1051,23 +1107,28 @@ next_chunk:
 	}
 	if (marked_bad || verbose_option) {
 		std::clog << marked_bad << " cluster" << (marked_bad == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { marked_bad } << cluster_shift) << ") marked bad\n";
+				" (" << byte_count(uintmax_t { marked_bad } << cluster_shift) << ')' <<
+				(dry_run_option ? " would have been" : "") << " marked bad\n";
 	}
 	if (marked_free || verbose_option) {
 		std::clog << marked_free << " cluster" << (marked_free == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { marked_free } << cluster_shift) << ") marked free\n";
+				" (" << byte_count(uintmax_t { marked_free } << cluster_shift) << ')' <<
+				(dry_run_option ? " would have been" : "") << " marked free\n";
 	}
 	if (zeroed_out || verbose_option) {
 		std::clog << zeroed_out << " cluster" << (zeroed_out == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { zeroed_out } << cluster_shift) << ") zeroed out\n";
+				" (" << byte_count(uintmax_t { zeroed_out } << cluster_shift) << ')' <<
+				(dry_run_option ? " would have been" : "") << " zeroed out\n";
 	}
 	if (discarded || verbose_option) {
 		std::clog << discarded << " cluster" << (discarded == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { discarded } << cluster_shift) << ") discarded\n";
+				" (" << byte_count(uintmax_t { discarded } << cluster_shift) << ')' <<
+				(dry_run_option ? " would have been" : "") << " discarded\n";
 	}
 	if (trashed || verbose_option) {
 		std::clog << trashed << " cluster" << (trashed == 1 ? "" : "s") <<
-				" (" << byte_count(uintmax_t { trashed } << cluster_shift) << ") trashed\n";
+				" (" << byte_count(uintmax_t { trashed } << cluster_shift) << ')' <<
+				(dry_run_option ? " would have been" : "") << " trashed\n";
 	}
 	if (misplaced) {
 		std::clog << misplaced << " cluster" << (misplaced == 1 ? "" : "s") <<

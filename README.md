@@ -19,6 +19,7 @@ usage: flakyflash [options] <block-device>
 options:
 	-b,--bad-clusters=[<action>,...]
 	-f,--free-clusters=[<action>,...]
+	-n,--dry-run
 	-v,--verbose
 
 actions:
@@ -41,6 +42,8 @@ defaults:
 	--bad-clusters=
 	--free-clusters=read,reread
 ```
+
+If run with the `--dry-run` option, Flakyflash does not perform any writes to the media. Any destructive actions specified in `--bad-clusters` or `--free-clusters` will be ignored with a warning.
 
 If run with the `--verbose` option, Flakyflash outputs a human-readable decoding of all standard [FAT][] or [exFAT][] file system superblock fields, including FAT32-specific fields (if applicable) and the fields of the File System Information sector (if present).
 
