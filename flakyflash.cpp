@@ -1071,8 +1071,9 @@ next_chunk:
 	}
 	if (misplaced) {
 		std::clog << misplaced << " cluster" << (misplaced == 1 ? "" : "s") <<
-				" contained data intended for other clusters. This may\n"
-				"indicate that your flash media is fraudulent. For more information, see\n"
+				" (" << byte_count(uintmax_t { misplaced } << cluster_shift) << ") "
+				"contained data intended for other clusters. This\n"
+				"may indicate that your flash media is fraudulent. For more information, see\n"
 				"https://github.com/AltraMayor/f3." << std::endl;
 		return 2;
 	}
