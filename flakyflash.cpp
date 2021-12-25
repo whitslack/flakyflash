@@ -597,6 +597,9 @@ int main(int argc, char *argv[]) {
 				if ((bitmap[idx / 8] & std::byte { 1 } << idx % 8) == std::byte { }) {
 					return 0; // cluster is free, irrespective of stale entry in FAT
 				}
+				if (!static_cast<const le<uint32_t> *>(fat)[cluster]) {
+					return 0xFFFFFFFF; // cluster is in use, irrespective of stale entry in FAT
+				}
 			}
 			return static_cast<const le<uint32_t> *>(fat)[cluster];
 		};
